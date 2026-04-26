@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUser(data) {
+      return data.uid == request.auth.uid &&
+             data.email is string &&
+             (data.get('displayName', '') is string && data.get('displayName', '').size() <= 100) &&
+             (data.get('githubUsername', '') is string && data.get('githubUsername', '').size() <= 100);
+    }
+
+    function isValidProject(data) {
+      return data.userId == request.auth.uid &&
+             data.title is string && data.title.size() <= 100 &&
+             data.status in ["In Progress", "Completed"] &&
+             (data.get('techStack', []) is list) &&
+             (data.get('description', '').size() <= 5000);
+    }
+
+    // --- Collections ---
+
+    // Users collection
+    match /users/{userId} {
+      // Public profiles: anyone can get a user by ID
+      allow get: if true;
+      // Listing users is sensitive - avoid query scraping
+      allow list: if false;
+
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().createdAt == request.time;
+      allow update: if isOwner(userId) &&
+                       isValidUser(incoming()) &&
+                       incoming().uid == existing().uid &&
+                       incoming().email == existing().email &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt == request.time;
+      allow delete: if false; // Users can't delete accounts from client for safety
+
+      // Projects subcollection
+      match /projects/{projectId} {
+        // Anyone can see projects (public portfolio)
+        allow get: if isValidId(userId);
+        // List projects for a specific user profile
+        allow list: if isValidId(userId);
+
+        allow create: if isOwner(userId) && isValidId(projectId) && isValidProject(incoming()) && incoming().createdAt == request.time;
+        allow update: if isOwner(userId) && isValidId(projectId) &&
+                         isValidProject(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt == request.time &&
+                         // State-based lock: if status was Completed, can still update, but maybe lock some fields?
+                         // For now, simple update.
+                         incoming().diff(existing()).affectedKeys().hasAll([]) ; // Just template for actions
+
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
